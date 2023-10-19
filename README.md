@@ -1,13 +1,13 @@
-# scVGAE
+# scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation
 
-This is an official implementation of the paper, "BiGCN: Leveraging Cell and Gene Similarities for Single-cell Transcriptome Imputation with Bi-Graph Convolutional Networks"
+This is an official implementation of the paper, "scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation"
 
-scBiGCN is a method that utilizes two GCNs to reconstruct gene expression matrices based on the similarity matrices of cells and genes. Utilizing each similarity enables the recovery of information lost through Dropout.
+This model utilizes Zero-Inflated Negative Binomial Loss and MSELoss to impute the single-cell RNA-seq (scRNA).
 
-scBiGCN has been implemented in Python.
+scVGAE has been implemented in Python.
 
 To get started immediately, check out our tutorials:
-- [Tutorial](https://github.com/inoue0426/scBiGCN/blob/main/sample%20notebook.ipynb)
+- [Tutorial](https://github.com/inoue0426/scVGAE/blob/main/sample%20notebook.ipynb)
 
 ## Requirement
 
