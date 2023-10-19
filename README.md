@@ -1,5 +1,7 @@
 # scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation
 
+![](scVGAE.png)
+
 This is an official implementation of the paper, "scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation"
 
 This model utilizes Zero-Inflated Negative Binomial Loss and MSELoss to impute the single-cell RNA-seq (scRNA).
