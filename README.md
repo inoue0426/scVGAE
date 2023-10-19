@@ -51,3 +51,6 @@ import scVGAE
 # Here, df should be cell by genes data and index is cell types.
 scVGAE.run_model(df, verbose=True) 
 ```
+
+## Help
+If you have any questions or require assistance using MAGIC, please feel free to make issues on https://github.com/inoue0426/scVGAE/
