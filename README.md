@@ -25,7 +25,7 @@ tqdm==4.65.0
 
 ## Environment
 
-Our experiment was conducted on Ubuntu with an RTX 2080, but it also works on an M1 Mac. To use this model, please adjust the requirements to suit your environment, paying special attention to the PyTorch-related libraries. 
+Our experiment was conducted on Ubuntu with an NVIDIA A100 Tensor Core GPU, but this also works on an M1 Mac. To use this model, please adjust the requirements to suit your environment, paying particular attention to the PyTorch-related libraries. 
 **  Please note that as of October 8, 2023, this model doesn't support GPU on M1 Mac due to compatibility issues with PyTorch Geometric. 
 
 ## Installation from GitHub
