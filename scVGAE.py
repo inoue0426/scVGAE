@@ -105,12 +105,12 @@ class VGAE(Module):
         self.dropout1 = nn.Dropout(params["dropout1"])
         self.dropout2 = nn.Dropout(params["dropout2"])
 
-        # Encoder with 2 gat layers
-        self.gat1 = GCNConv(params["input_dim"], params["hidden1"])
+        # Encoder with 2 gcn layers
+        self.gcn1 = GCNConv(params["input_dim"], params["hidden1"])
         self.gn1 = GraphNorm(params["hidden1"])
-        self.gat2_mean = GCNConv(params["hidden1"], params["input_dim"])
-        self.gat2_dropout = GCNConv(params["hidden1"], params["input_dim"])
-        self.gat2_dispersion = GCNConv(params["hidden1"], params["input_dim"])
+        self.gcn2_mean = GCNConv(params["hidden1"], params["input_dim"])
+        self.gcn2_dropout = GCNConv(params["hidden1"], params["input_dim"])
+        self.gcn2_dispersion = GCNConv(params["hidden1"], params["input_dim"])
 
         # Decoder with 2 Linear layers
         self.fc1 = Linear(params["input_dim"], params["hidden2"])
@@ -121,12 +121,12 @@ class VGAE(Module):
         self.batch_norm2 = BatchNorm1d(params["hidden0"])
 
     def encode(self, x, adj):
-        x = relu(self.gn1(self.gat1(x, adj)))
+        x = relu(self.gn1(self.gcn1(x, adj)))
         x = self.dropout1(x)
 
-        z_mean = torch.exp(self.gat2_mean(x, adj.t()))
-        z_dropout = torch.sigmoid(self.gat2_dropout(x, adj.t()))
-        z_dispersion = torch.exp(self.gat2_dispersion(x, adj.t()))
+        z_mean = torch.exp(self.gcn2_mean(x, adj.t()))
+        z_dropout = torch.sigmoid(self.gcn2_dropout(x, adj.t()))
+        z_dispersion = torch.exp(self.gcn2_dispersion(x, adj.t()))
         return z_mean, z_dropout, z_dispersion
 
     def decode(self, z):
