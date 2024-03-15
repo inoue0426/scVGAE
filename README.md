@@ -1,5 +1,7 @@
 # scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation
 
+[![arXiv](https://img.shields.io/badge/arXiv-2403.08959-b31b1b.svg)](https://arxiv.org/abs/2403.08959)
+
 ![](scVGAE.png)
 
 This is an official implementation of the paper, "scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation"
