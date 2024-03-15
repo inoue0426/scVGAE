@@ -52,5 +52,18 @@ import scVGAE
 scVGAE.run_model(df, verbose=True) 
 ```
 
+## Citation
+
+```
+@misc{inoue2024scvgae,
+      title={scVGAE: A Novel Approach using ZINB-Based Variational Graph Autoencoder for Single-Cell RNA-Seq Imputation}, 
+      author={Yoshitaka Inoue},
+      year={2024},
+      eprint={2403.08959},
+      archivePrefix={arXiv},
+      primaryClass={q-bio.GN}
+}
+```
+
 ## Help
 If you have any questions or require assistance using MAGIC, please feel free to make issues on https://github.com/inoue0426/scVGAE/
