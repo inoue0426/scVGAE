@@ -9,8 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch_geometric
 from sklearn.metrics.pairwise import pairwise_kernels
-from torch.nn import (BatchNorm1d, CrossEntropyLoss, Dropout, Linear, Module,
-                      MSELoss)
+from torch.nn import BatchNorm1d, CrossEntropyLoss, Dropout, Linear, Module, MSELoss
 from torch.nn.functional import relu, softplus
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv, GCNConv, GraphNorm
