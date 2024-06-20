@@ -141,7 +141,11 @@ class VGAE(Module):
         adj_t,
     ):
         z_mean, z_dropout, z_dispersion = self.encode(x, adj.t())
-        x_recon = self.decode(z_mean) + relu(self.batch_norm1(x)) + relu(self.batch_norm2(x_t).T)
+        x_recon = (
+            self.decode(z_mean)
+            + relu(self.batch_norm1(x))
+            + relu(self.batch_norm2(x_t).T)
+        )
         return x_recon, z_mean, z_dropout, z_dispersion
 
 
