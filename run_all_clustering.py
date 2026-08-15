@@ -1,4 +1,5 @@
 import argparse
+import gzip
 import json
 import random
 import time
@@ -40,7 +41,7 @@ def set_seed(seed):
 
 
 def load_dataset(data_root, dataset):
-    """Load historical paper data from either an extracted directory or zip file."""
+    """Load historical paper data from an extracted directory or nested zip/gzip."""
     data_root = Path(data_root)
     direct = data_root / dataset / "data.csv.gz"
     if direct.exists():
@@ -58,8 +59,12 @@ def load_dataset(data_root, dataset):
                 raise RuntimeError(
                     f"Expected one data.csv.gz in {archive}, found {len(members)}: {members}"
                 )
-            with zf.open(members[0]) as handle:
-                return pd.read_csv(handle, index_col=0), f"{archive}:{members[0]}"
+            with zf.open(members[0]) as zipped_gzip_stream:
+                # The zip member is itself gzip-compressed. pandas cannot infer
+                # gzip compression from a file-like object, so decompress it explicitly.
+                with gzip.GzipFile(fileobj=zipped_gzip_stream, mode="rb") as handle:
+                    frame = pd.read_csv(handle, index_col=0)
+            return frame, f"{archive}:{members[0]}"
 
     raise FileNotFoundError(
         f"Could not find {direct} or {archive}. "
@@ -68,16 +73,7 @@ def load_dataset(data_root, dataset):
 
 
 def historical_preprocess(df):
-    """Reproduce preprocessing used by the historical clustering notebooks.
-
-    1. Retain genes nonzero in >5% of cells.
-    2. Retain cells nonzero in >5% of genes.
-    3. log1p transform.
-    4. Library-size normalize each cell to total 10,000.
-    5. Square-root transform.
-
-    Cell-type labels are taken from the DataFrame index.
-    """
+    """Reproduce preprocessing used by the historical clustering notebooks."""
     nonzero = np.sign(df.to_numpy())
     col_mask = nonzero.sum(axis=0) > int(df.shape[0] * 0.05)
     row_mask = nonzero.sum(axis=1) > int(df.shape[1] * 0.05)
@@ -109,14 +105,7 @@ def cluster_kmeans(prediction, labels, seed):
 
 
 def cluster_paper_protocol(prediction, labels, seed):
-    """Reproduce the historical paper's oracle-style clustering comparison.
-
-    The historical notebook evaluated KMeans and SpectralClustering with cosine,
-    linear, and polynomial affinities, then reported the maximum ARI and maximum
-    AMI independently across those clusterers. This mode is for comparison with
-    the previously reported table; kmeans mode is preferable for a single fixed
-    evaluation protocol.
-    """
+    """Reproduce the historical max-over-clusterers evaluation protocol."""
     n_clusters = len(np.unique(labels))
     candidates = []
 
@@ -156,7 +145,8 @@ def cluster_paper_protocol(prediction, labels, seed):
         "best_ari_method": best_ari[0],
         "best_ami_method": best_ami[0],
         "all_clusterers": [
-            {"method": name, "ARI": ari, "AMI": ami} for name, ari, ami in candidates
+            {"method": name, "ARI": ari, "AMI": ami}
+            for name, ari, ami in candidates
         ],
     }
 
@@ -188,7 +178,7 @@ def main():
         "--cluster-mode",
         choices=["kmeans", "paper"],
         default="kmeans",
-        help="kmeans is fixed and much faster; paper reproduces the historical max-over-clusterers protocol.",
+        help="kmeans is fixed and faster; paper reproduces the historical max-over-clusterers protocol.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -196,19 +186,16 @@ def main():
         choices=["auto", "cpu", "cuda"],
         default="auto",
     )
-    parser.add_argument(
-        "--output-dir",
-        default="all_dataset_results",
-    )
+    parser.add_argument("--output-dir", default="all_dataset_results")
     parser.add_argument(
         "--save-predictions",
         action="store_true",
-        help="Save each imputed matrix as .npy. Disabled by default because files can be large.",
+        help="Save each imputed matrix as .npy.",
     )
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Re-run datasets even when they already exist in the output CSV.",
+        help="Re-run datasets even when successful results already exist.",
     )
     args = parser.parse_args()
 
@@ -230,8 +217,12 @@ def main():
         previous = pd.read_csv(results_path)
         if "dataset" in previous.columns:
             records = previous.to_dict("records")
-            completed = set(previous["dataset"].astype(str))
-            print(f"Resuming: {len(completed)} completed datasets found.")
+            if "status" in previous.columns:
+                successful = previous[previous["status"].astype(str) == "ok"]
+                completed = set(successful["dataset"].astype(str))
+            print(
+                f"Resuming: {len(completed)} successful datasets found; failures will retry."
+            )
 
     metadata = {
         "datasets": args.datasets,
@@ -247,9 +238,7 @@ def main():
 
     for index, dataset in enumerate(args.datasets, start=1):
         if dataset in completed:
-            print(
-                f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping"
-            )
+            print(f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping")
             continue
 
         print(f"[{index}/{len(args.datasets)}] {dataset}: loading")
@@ -286,6 +275,7 @@ def main():
                 "elapsed_seconds": elapsed,
                 "status": "ok",
             }
+
             if "all_clusterers" in metrics:
                 with open(
                     output_dir / f"{dataset}_clusterers.json", "w", encoding="utf-8"
