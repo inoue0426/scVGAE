@@ -13,7 +13,6 @@ from torch.nn import BatchNorm1d, CrossEntropyLoss, Dropout, Linear, Module, MSE
 from torch.nn.functional import relu, softplus
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv, GCNConv, GraphNorm
-from torch_sparse import SparseTensor
 from tqdm import tqdm
 
 
@@ -23,12 +22,18 @@ def get_topX(X):
 
 
 def get_adj(x):
-    adj = SparseTensor(
-        row=torch.tensor(np.array(x.nonzero()))[0],
-        col=torch.tensor(np.array(x.nonzero()))[1],
-        sparse_sizes=(x.shape[0], x.shape[0]),
-    )
-    return adj
+    """Return graph connectivity as a PyG edge_index tensor.
+
+    Using a plain torch.LongTensor avoids a hard dependency on
+    torch_sparse.SparseTensor while remaining compatible with GCNConv.
+    """
+    row, col = x.nonzero()
+    return torch.tensor(np.vstack((row, col)), dtype=torch.long)
+
+
+def transpose_adj(edge_index):
+    """Reverse source and target rows of a PyG edge_index tensor."""
+    return edge_index.flip(0)
 
 
 def get_data(X, metric="linear"):
@@ -154,9 +159,10 @@ class VGAE(Module):
         x = relu(self.gn1(self.gcn1(x, adj)))
         x = self.dropout1(x)
 
-        z_mean = torch.exp(self.gcn2_mean(x, adj.t()))
-        z_dropout = torch.sigmoid(self.gcn2_dropout(x, adj.t()))
-        z_dispersion = torch.exp(self.gcn2_dispersion(x, adj.t()))
+        adj_t = transpose_adj(adj)
+        z_mean = torch.exp(self.gcn2_mean(x, adj_t))
+        z_dropout = torch.sigmoid(self.gcn2_dropout(x, adj_t))
+        z_dispersion = torch.exp(self.gcn2_dispersion(x, adj_t))
         return z_mean, z_dropout, z_dispersion
 
     def decode(self, z):
@@ -171,7 +177,7 @@ class VGAE(Module):
         x_t,
         adj_t,
     ):
-        z_mean, z_dropout, z_dispersion = self.encode(x, adj.t())
+        z_mean, z_dropout, z_dispersion = self.encode(x, transpose_adj(adj))
         x_recon = self.decode(z_mean) + self.batch_norm1(x) + self.batch_norm2(x_t).T
         return x_recon, z_mean, z_dropout, z_dispersion
 
