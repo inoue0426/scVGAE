@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 
 def get_topX(X):
+    # Retain similarities above the 85th percentile.
     return X * np.array(X > np.percentile(X, 85), dtype=int)
 
 
@@ -41,9 +42,9 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
     Compute the ZINB Loss.
 
     y_true: Ground truth data.
-    y_pred: Predicted mean from the model.
-    theta: Dispersion parameter.
-    pi: Zero-inflation probability.
+    y_pred: Predicted ZINB mean parameter (mu).
+    theta: Predicted dispersion parameter.
+    pi: Predicted zero-inflation probability.
     eps: Small constant to prevent log(0).
     """
 
@@ -72,26 +73,23 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
 
 def compute_loss(x_original, x_recon, z_mean, z_dropout, z_dispersion, alpha):
     """
-    Compute the combined loss: ZINB Loss + MSE Loss.
+    Compute the historical scVGAE objective:
+    alpha * ZINB Loss + (1 - alpha) * MSE Loss.
 
     Parameters:
     - x_original: Original data matrix.
     - x_recon: Reconstructed matrix from the model.
-    - z_mean, z_dropout, z_dispersion: Outputs from the model, used for ZINB Loss calculation.
-    - device: Device to which tensors should be moved before computation.
-    - lambda_1, lambda_2: Weights for ZINB Loss and MSE Loss respectively.
+    - z_mean: ZINB mean parameter.
+    - z_dropout: ZINB zero-inflation probability.
+    - z_dispersion: ZINB dispersion parameter.
+    - alpha: Weight for ZINB loss; (1-alpha) weights MSE loss.
 
     Returns:
     - total_loss: Combined loss value.
     """
 
-    # Compute ZINB Loss (assuming ZINBLoss is a properly defined function or class)
     zinb_loss = ZINBLoss(x_original, z_mean, z_dispersion, z_dropout)
-
-    # Compute MSE Loss
     mse_loss = MSELoss()(x_recon, x_original)
-
-    # Combine the losses
     total_loss = alpha * zinb_loss + (1 - alpha) * mse_loss
 
     return total_loss
@@ -104,7 +102,9 @@ class VGAE(Module):
         self.dropout1 = nn.Dropout(params["dropout1"])
         self.dropout2 = nn.Dropout(params["dropout2"])
 
-        # Encoder with 2 gcn layers
+        # Graph encoder with ZINB parameter heads.
+        # The historical class name VGAE is retained for compatibility;
+        # this implementation does not perform variational latent sampling.
         self.gcn1 = GCNConv(params["input_dim"], params["hidden1"])
         self.gn1 = GraphNorm(params["hidden1"])
         self.gcn2_mean = GCNConv(params["hidden1"], params["input_dim"])
@@ -195,9 +195,10 @@ def run_model(input_data, verbose=False, device=False):
     for epoch in epochs:
         x_recon, z_mean, z_dropout, z_dispersion = model(x, adj, x_t, adj_t)
 
-        # Compute the ZINB Loss using the outputs from the model
+        # Pass the ZINB outputs in their intended order:
+        # mean, zero-inflation probability, dispersion.
         loss = compute_loss(
-            x, x_recon, z_mean, z_dispersion, z_dropout, params["alpha"]
+            x, x_recon, z_mean, z_dropout, z_dispersion, params["alpha"]
         ).to(device)
         optimizer.zero_grad()
         loss.backward()
