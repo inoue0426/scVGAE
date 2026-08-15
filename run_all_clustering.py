@@ -220,7 +220,9 @@ def main():
             if "status" in previous.columns:
                 ok = previous[previous["status"].astype(str) == "ok"]
                 completed = set(ok["dataset"].astype(str))
-            print(f"Resuming: {len(completed)} successful datasets found; failures will retry.")
+            print(
+                f"Resuming: {len(completed)} successful datasets found; failures will retry."
+            )
 
     metadata = {
         "datasets": args.datasets,
@@ -236,7 +238,9 @@ def main():
 
     for index, dataset in enumerate(args.datasets, start=1):
         if dataset in completed:
-            print(f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping")
+            print(
+                f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping"
+            )
             continue
 
         print(f"[{index}/{len(args.datasets)}] {dataset}: loading")
