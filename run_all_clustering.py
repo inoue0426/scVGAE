@@ -60,8 +60,6 @@ def load_dataset(data_root, dataset):
                     f"Expected one data.csv.gz in {archive}, found {len(members)}: {members}"
                 )
             with zf.open(members[0]) as zipped_gzip_stream:
-                # The zip member is itself gzip-compressed. pandas cannot infer
-                # gzip compression from a file-like object, so decompress it explicitly.
                 with gzip.GzipFile(fileobj=zipped_gzip_stream, mode="rb") as handle:
                     frame = pd.read_csv(handle, index_col=0)
             return frame, f"{archive}:{members[0]}"
@@ -180,6 +178,7 @@ def main():
         help="kmeans is fixed and faster; paper reproduces the historical max-over-clusterers protocol.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda"],
@@ -229,6 +228,7 @@ def main():
         "seed": args.seed,
         "device": str(device),
         "model": "variational scVGAE with standard ZINB and KL",
+        "latent_dim": args.latent_dim,
         "alpha": 0.05,
         "beta": 0.0001,
         "epochs": 100,
@@ -253,7 +253,12 @@ def main():
             )
 
             set_seed(args.seed)
-            prediction = scVGAE.run_model(processed, verbose=False, device=device)
+            prediction = scVGAE.run_model(
+                processed,
+                verbose=False,
+                device=device,
+                latent_dim=args.latent_dim,
+            )
 
             if not np.isfinite(prediction).all():
                 raise RuntimeError("Prediction contains NaN or infinity")
