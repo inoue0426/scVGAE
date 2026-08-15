@@ -118,8 +118,9 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(
-        "cuda" if args.device == "auto" and torch.cuda.is_available() else
-        "cpu" if args.device == "auto" else args.device
+        "cuda"
+        if args.device == "auto" and torch.cuda.is_available()
+        else "cpu" if args.device == "auto" else args.device
     )
 
     data = pd.read_csv(args.input, index_col=0)

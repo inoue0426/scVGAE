@@ -43,9 +43,7 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         + y_true * (torch.log(y_pred + eps) - log_theta_mu)
     )
     nb_zero_log_prob = theta * (torch.log(theta + eps) - log_theta_mu)
-    zero_log_prob = torch.logaddexp(
-        torch.log(pi), torch.log1p(-pi) + nb_zero_log_prob
-    )
+    zero_log_prob = torch.logaddexp(torch.log(pi), torch.log1p(-pi) + nb_zero_log_prob)
     nonzero_log_prob = torch.log1p(-pi) + nb_log_prob
     log_prob = torch.where(y_true < eps, zero_log_prob, nonzero_log_prob)
     return -torch.sum(log_prob)
@@ -72,9 +70,7 @@ def legacy_ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
 
 def KLDLoss(mu_z, logvar_z):
     """KL[q(z|X,A) || N(0,I)], averaged across cells."""
-    kl = -0.5 * torch.sum(
-        1 + logvar_z - mu_z.pow(2) - logvar_z.exp(), dim=1
-    )
+    kl = -0.5 * torch.sum(1 + logvar_z - mu_z.pow(2) - logvar_z.exp(), dim=1)
     return torch.mean(kl)
 
 
@@ -158,9 +154,7 @@ class VGAE(Module):
         z = self.reparameterize(mu_z, logvar_z)
         z_mean, z_dropout, z_dispersion = self.decode_zinb(z, edge_index)
         x_recon = (
-            self.decode_expression(z)
-            + self.batch_norm1(x)
-            + self.batch_norm2(x_t).T
+            self.decode_expression(z) + self.batch_norm1(x) + self.batch_norm2(x_t).T
         )
         return x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z
 
