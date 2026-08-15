@@ -1,5 +1,4 @@
 import argparse
-import gzip
 import json
 import random
 import time
@@ -59,12 +58,8 @@ def load_dataset(data_root, dataset):
                 raise RuntimeError(
                     f"Expected one data.csv.gz in {archive}, found {len(members)}: {members}"
                 )
-            with zf.open(members[0]) as compressed_handle:
-                # zf.open() returns a generic stream, so pandas cannot infer that
-                # the member itself is gzip-compressed from its filename. Decompress
-                # it explicitly before handing the CSV stream to pandas.
-                with gzip.GzipFile(fileobj=compressed_handle, mode="rb") as handle:
-                    return pd.read_csv(handle, index_col=0), f"{archive}:{members[0]}"
+            with zf.open(members[0]) as handle:
+                return pd.read_csv(handle, index_col=0), f"{archive}:{members[0]}"
 
     raise FileNotFoundError(
         f"Could not find {direct} or {archive}. "
@@ -73,7 +68,16 @@ def load_dataset(data_root, dataset):
 
 
 def historical_preprocess(df):
-    """Reproduce preprocessing used by the historical clustering notebooks."""
+    """Reproduce preprocessing used by the historical clustering notebooks.
+
+    1. Retain genes nonzero in >5% of cells.
+    2. Retain cells nonzero in >5% of genes.
+    3. log1p transform.
+    4. Library-size normalize each cell to total 10,000.
+    5. Square-root transform.
+
+    Cell-type labels are taken from the DataFrame index.
+    """
     nonzero = np.sign(df.to_numpy())
     col_mask = nonzero.sum(axis=0) > int(df.shape[0] * 0.05)
     row_mask = nonzero.sum(axis=1) > int(df.shape[1] * 0.05)
@@ -105,7 +109,14 @@ def cluster_kmeans(prediction, labels, seed):
 
 
 def cluster_paper_protocol(prediction, labels, seed):
-    """Reproduce the historical max-over-clusterers evaluation protocol."""
+    """Reproduce the historical paper's oracle-style clustering comparison.
+
+    The historical notebook evaluated KMeans and SpectralClustering with cosine,
+    linear, and polynomial affinities, then reported the maximum ARI and maximum
+    AMI independently across those clusterers. This mode is for comparison with
+    the previously reported table; kmeans mode is preferable for a single fixed
+    evaluation protocol.
+    """
     n_clusters = len(np.unique(labels))
     candidates = []
 
@@ -185,7 +196,10 @@ def main():
         choices=["auto", "cpu", "cuda"],
         default="auto",
     )
-    parser.add_argument("--output-dir", default="all_dataset_results")
+    parser.add_argument(
+        "--output-dir",
+        default="all_dataset_results",
+    )
     parser.add_argument(
         "--save-predictions",
         action="store_true",
@@ -194,7 +208,7 @@ def main():
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Re-run all datasets regardless of prior successful results.",
+        help="Re-run datasets even when they already exist in the output CSV.",
     )
     args = parser.parse_args()
 
@@ -216,13 +230,8 @@ def main():
         previous = pd.read_csv(results_path)
         if "dataset" in previous.columns:
             records = previous.to_dict("records")
-            # Only successful rows count as completed. Failed datasets are retried.
-            if "status" in previous.columns:
-                ok = previous[previous["status"].astype(str) == "ok"]
-                completed = set(ok["dataset"].astype(str))
-            print(
-                f"Resuming: {len(completed)} successful datasets found; failures will retry."
-            )
+            completed = set(previous["dataset"].astype(str))
+            print(f"Resuming: {len(completed)} completed datasets found.")
 
     metadata = {
         "datasets": args.datasets,

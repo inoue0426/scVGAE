@@ -2,30 +2,67 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.metrics.pairwise import pairwise_kernels
+from sklearn.decomposition import PCA
+from sklearn.neighbors import NearestNeighbors
 from torch.nn import BatchNorm1d, Linear, Module, MSELoss
 from torch.nn.functional import relu
 from torch_geometric.nn import GCNConv, GraphNorm
 from tqdm import tqdm
 
 
-def get_topX(X):
-    return X * np.array(X > np.percentile(X, 85), dtype=int)
+def get_adj(X, k=30, pca_dim=50):
+    """Construct a scalable symmetric cell-cell kNN graph.
 
+    Neighbors are computed in a PCA representation to avoid the quadratic dense
+    similarity matrix used by the historical implementation. The returned graph
+    is a standard PyG edge_index tensor.
+    """
+    values = np.asarray(X, dtype=np.float32)
+    n_samples, n_features = values.shape
+    if n_samples < 2:
+        return torch.empty((2, 0), dtype=torch.long)
 
-def get_adj(x):
-    row, col = x.nonzero()
-    return torch.tensor(np.vstack((row, col)), dtype=torch.long)
+    n_components = min(pca_dim, n_samples - 1, n_features)
+    if n_components < n_features:
+        embedding = PCA(
+            n_components=n_components,
+            svd_solver="randomized",
+            random_state=0,
+        ).fit_transform(values)
+    else:
+        embedding = values
+
+    n_neighbors = min(k + 1, n_samples)
+    indices = NearestNeighbors(
+        n_neighbors=n_neighbors,
+        metric="euclidean",
+        algorithm="auto",
+    ).fit(embedding).kneighbors(return_distance=False)
+
+    rows = np.repeat(np.arange(n_samples), indices.shape[1])
+    cols = indices.reshape(-1)
+    keep = rows != cols
+    rows = rows[keep]
+    cols = cols[keep]
+
+    # Symmetrize and remove duplicate edges.
+    edges = np.concatenate(
+        [np.stack([rows, cols], axis=1), np.stack([cols, rows], axis=1)], axis=0
+    )
+    edges = np.unique(edges, axis=0)
+    return torch.tensor(edges.T, dtype=torch.long)
 
 
 def transpose_adj(edge_index):
     return edge_index.flip(0)
 
 
-def get_data(X, metric="linear"):
-    dist = pairwise_kernels(X, metric=metric)
-    dist_x = get_topX(dist)
-    return torch.tensor(X.values, dtype=torch.float), get_adj(dist_x)
+def get_data(X, metric="linear", k=30, pca_dim=50):
+    del metric  # retained for backward-compatible call signatures
+    return (
+        torch.tensor(X.values, dtype=torch.float),
+        get_adj(X.values, k=k, pca_dim=pca_dim),
+    )
 
 
 def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
@@ -94,7 +131,7 @@ def compute_loss(
 
 
 class VGAE(Module):
-    """Variational graph autoencoder with ZINB observation heads."""
+    """Memory-efficient variational graph autoencoder with ZINB heads."""
 
     def __init__(self, params):
         super(VGAE, self).__init__()
@@ -104,16 +141,19 @@ class VGAE(Module):
         input_dim = params["input_dim"]
         hidden1 = params["hidden1"]
         hidden2 = params["hidden2"]
-        latent_dim = params.get("latent_dim", input_dim)
+        latent_dim = params.get("latent_dim", hidden1)
 
+        # All message passing stays in low-dimensional hidden/latent spaces.
         self.gcn1 = GCNConv(input_dim, hidden1)
         self.gn1 = GraphNorm(hidden1)
         self.gcn_mu = GCNConv(hidden1, latent_dim)
         self.gcn_logvar = GCNConv(hidden1, latent_dim)
 
-        self.gcn_zinb_mean = GCNConv(latent_dim, input_dim)
-        self.gcn_zinb_dropout = GCNConv(latent_dim, input_dim)
-        self.gcn_zinb_dispersion = GCNConv(latent_dim, input_dim)
+        # Project the latent representation to per-gene ZINB parameters only
+        # after graph propagation. This avoids materializing edge x gene tensors.
+        self.zinb_mean = Linear(latent_dim, input_dim)
+        self.zinb_dropout = Linear(latent_dim, input_dim)
+        self.zinb_dispersion = Linear(latent_dim, input_dim)
 
         self.fc1 = Linear(latent_dim, hidden2)
         self.bn2 = BatchNorm1d(hidden2)
@@ -135,11 +175,11 @@ class VGAE(Module):
             return mu_z + torch.randn_like(std) * std
         return mu_z
 
-    def decode_zinb(self, z, edge_index):
-        z_mean = torch.exp(torch.clamp(self.gcn_zinb_mean(z, edge_index), max=15.0))
-        z_dropout = torch.sigmoid(self.gcn_zinb_dropout(z, edge_index))
+    def decode_zinb(self, z):
+        z_mean = torch.exp(torch.clamp(self.zinb_mean(z), min=-15.0, max=15.0))
+        z_dropout = torch.sigmoid(self.zinb_dropout(z))
         z_dispersion = torch.exp(
-            torch.clamp(self.gcn_zinb_dispersion(z, edge_index), max=15.0)
+            torch.clamp(self.zinb_dispersion(z), min=-15.0, max=15.0)
         )
         return z_mean, z_dropout, z_dispersion
 
@@ -148,19 +188,27 @@ class VGAE(Module):
         h = self.dropout2(h)
         return relu(self.fc2(h))
 
-    def forward(self, x, adj, x_t, adj_t):
+    def forward(self, x, adj, x_t, adj_t=None):
+        del adj_t
         edge_index = transpose_adj(adj)
         mu_z, logvar_z = self.encode(x, edge_index)
         z = self.reparameterize(mu_z, logvar_z)
-        z_mean, z_dropout, z_dispersion = self.decode_zinb(z, edge_index)
+        z_mean, z_dropout, z_dispersion = self.decode_zinb(z)
         x_recon = (
             self.decode_expression(z) + self.batch_norm1(x) + self.batch_norm2(x_t).T
         )
         return x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z
 
 
-def run_model(input_data, verbose=False, device=False):
-    """Run scVGAE using the variational graph autoencoder objective."""
+def run_model(
+    input_data,
+    verbose=False,
+    device=False,
+    graph_k=30,
+    graph_pca_dim=50,
+    latent_dim=128,
+):
+    """Run the variational scVGAE model."""
     params = {
         "dropout1": 0.2,
         "dropout2": 0.4,
@@ -175,21 +223,24 @@ def run_model(input_data, verbose=False, device=False):
     if not device:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    x, adj = get_data(input_data)
-    x_t, adj_t = get_data(input_data.T)
+    x, adj = get_data(input_data, k=graph_k, pca_dim=graph_pca_dim)
+    # The transpose is needed only by the gene-wise BatchNorm residual term;
+    # no gene graph is constructed because it is not used by message passing.
+    x_t = torch.tensor(input_data.T.values, dtype=torch.float)
+
     x, adj = x.to(device), adj.to(device)
-    x_t, adj_t = x_t.to(device), adj_t.to(device)
+    x_t = x_t.to(device)
 
     params["input_dim"] = input_data.shape[1]
     params["hidden0"] = input_data.shape[0]
-    params["latent_dim"] = input_data.shape[1]
+    params["latent_dim"] = latent_dim
 
     model = VGAE(params).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"])
     epochs = tqdm(range(params["epochs"])) if verbose else range(params["epochs"])
 
     for _ in epochs:
-        outputs = model(x, adj, x_t, adj_t)
+        outputs = model(x, adj, x_t, None)
         x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z = outputs
         loss, _, _, _ = compute_loss(
             x,
@@ -202,11 +253,11 @@ def run_model(input_data, verbose=False, device=False):
             params["alpha"],
             params["beta"],
         )
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
     model.eval()
     with torch.no_grad():
-        x_recon, *_ = model(x, adj, x_t, adj_t)
+        x_recon, *_ = model(x, adj, x_t, None)
     return x_recon.cpu().numpy()
