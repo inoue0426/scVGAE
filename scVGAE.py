@@ -33,11 +33,15 @@ def get_adj(X, k=30, pca_dim=50):
         embedding = values
 
     n_neighbors = min(k + 1, n_samples)
-    indices = NearestNeighbors(
-        n_neighbors=n_neighbors,
-        metric="euclidean",
-        algorithm="auto",
-    ).fit(embedding).kneighbors(return_distance=False)
+    indices = (
+        NearestNeighbors(
+            n_neighbors=n_neighbors,
+            metric="euclidean",
+            algorithm="auto",
+        )
+        .fit(embedding)
+        .kneighbors(return_distance=False)
+    )
 
     rows = np.repeat(np.arange(n_samples), indices.shape[1])
     cols = indices.reshape(-1)
