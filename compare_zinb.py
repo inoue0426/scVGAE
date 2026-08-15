@@ -140,7 +140,9 @@ def main():
 
     results = {}
     for loss_name in ("legacy", "standard"):
-        print(f"Running {loss_name} ZINB on {data.shape[0]} cells x {data.shape[1]} genes...")
+        print(
+            f"Running {loss_name} ZINB on {data.shape[0]} cells x {data.shape[1]} genes..."
+        )
         results[loss_name] = train_once(
             data,
             loss_name=loss_name,
@@ -149,7 +151,9 @@ def main():
             device=device,
         )
 
-        np.save(output_dir / f"prediction_{loss_name}.npy", results[loss_name]["prediction"])
+        np.save(
+            output_dir / f"prediction_{loss_name}.npy", results[loss_name]["prediction"]
+        )
         pd.DataFrame(
             {
                 "epoch": np.arange(1, args.epochs + 1),
