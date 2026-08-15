@@ -38,17 +38,51 @@ def get_data(X, metric="linear"):
 
 
 def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
-    """
-    Compute the ZINB Loss.
+    """Compute the standard zero-inflated negative binomial NLL.
 
-    y_true: Ground truth data.
+    y_true: Observed values.
     y_pred: Predicted ZINB mean parameter (mu).
     theta: Predicted dispersion parameter.
     pi: Predicted zero-inflation probability.
-    eps: Small constant to prevent log(0).
+    eps: Small constant for numerical stability.
     """
 
-    # Negative Binomial Loss
+    y_pred = torch.clamp(y_pred, min=eps)
+    theta = torch.clamp(theta, min=eps)
+    pi = torch.clamp(pi, min=eps, max=1 - eps)
+
+    log_theta_mu = torch.log(theta + y_pred + eps)
+
+    # log P_NB(x | mu, theta)
+    nb_log_prob = (
+        torch.lgamma(y_true + theta)
+        - torch.lgamma(theta)
+        - torch.lgamma(y_true + 1)
+        + theta * (torch.log(theta + eps) - log_theta_mu)
+        + y_true * (torch.log(y_pred + eps) - log_theta_mu)
+    )
+
+    # For x = 0, P_NB(0 | mu, theta) = (theta / (theta + mu)) ** theta.
+    nb_zero_log_prob = theta * (torch.log(theta + eps) - log_theta_mu)
+    zero_log_prob = torch.logaddexp(
+        torch.log(pi),
+        torch.log1p(-pi) + nb_zero_log_prob,
+    )
+
+    # For x > 0, ZINB probability is (1 - pi) * P_NB(x | mu, theta).
+    nonzero_log_prob = torch.log1p(-pi) + nb_log_prob
+
+    log_prob = torch.where(y_true < eps, zero_log_prob, nonzero_log_prob)
+    return -torch.sum(log_prob)
+
+
+def legacy_ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
+    """Historical scVGAE loss expression retained for reference only.
+
+    This preserves the original non-zero branch and three-decimal rounding.
+    It is not used by the default training path.
+    """
+
     nb_terms = (
         -torch.lgamma(y_true + theta)
         + torch.lgamma(y_true + 1)
@@ -58,9 +92,6 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         - y_true * torch.log(y_pred + theta + eps)
         + y_true * torch.log(y_pred + eps)
     )
-
-    # Zero-Inflation
-    zero_inflated = torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta))
 
     result = -torch.sum(
         torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta))
@@ -73,8 +104,8 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
 
 def compute_loss(x_original, x_recon, z_mean, z_dropout, z_dispersion, alpha):
     """
-    Compute the historical scVGAE objective:
-    alpha * ZINB Loss + (1 - alpha) * MSE Loss.
+    Compute the corrected scVGAE objective:
+    alpha * ZINB NLL + (1 - alpha) * MSE Loss.
 
     Parameters:
     - x_original: Original data matrix.
