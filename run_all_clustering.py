@@ -145,8 +145,7 @@ def cluster_paper_protocol(prediction, labels, seed):
         "best_ari_method": best_ari[0],
         "best_ami_method": best_ami[0],
         "all_clusterers": [
-            {"method": name, "ARI": ari, "AMI": ami}
-            for name, ari, ami in candidates
+            {"method": name, "ARI": ari, "AMI": ami} for name, ari, ami in candidates
         ],
     }
 
@@ -238,7 +237,9 @@ def main():
 
     for index, dataset in enumerate(args.datasets, start=1):
         if dataset in completed:
-            print(f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping")
+            print(
+                f"[{index}/{len(args.datasets)}] {dataset}: already complete, skipping"
+            )
             continue
 
         print(f"[{index}/{len(args.datasets)}] {dataset}: loading")
