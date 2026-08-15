@@ -68,7 +68,7 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         + (1 - (y_true < eps).float()) * nb_terms
     )
 
-    return torch.round(result, decimals=3)
+    return result
 
 
 def compute_loss(x_original, x_recon, z_mean, z_dropout, z_dispersion, alpha):
