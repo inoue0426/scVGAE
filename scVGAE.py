@@ -11,12 +11,7 @@ from tqdm import tqdm
 
 
 def get_adj(X, k=30, pca_dim=50):
-    """Construct a scalable symmetric cell-cell kNN graph.
-
-    Neighbors are computed in a PCA representation to avoid the quadratic dense
-    similarity matrix used by the historical implementation. The returned graph
-    is a standard PyG edge_index tensor.
-    """
+    """Construct a scalable symmetric cell-cell kNN graph."""
     values = np.asarray(X, dtype=np.float32)
     n_samples, n_features = values.shape
     if n_samples < 2:
@@ -49,7 +44,6 @@ def get_adj(X, k=30, pca_dim=50):
     rows = rows[keep]
     cols = cols[keep]
 
-    # Symmetrize and remove duplicate edges.
     edges = np.concatenate(
         [np.stack([rows, cols], axis=1), np.stack([cols, rows], axis=1)], axis=0
     )
@@ -62,7 +56,7 @@ def transpose_adj(edge_index):
 
 
 def get_data(X, metric="linear", k=30, pca_dim=50):
-    del metric  # retained for backward-compatible call signatures
+    del metric
     return (
         torch.tensor(X.values, dtype=torch.float),
         get_adj(X.values, k=k, pca_dim=pca_dim),
@@ -125,12 +119,27 @@ def compute_loss(
     logvar_z,
     alpha,
     beta,
+    use_zinb=True,
+    use_mse=True,
+    use_kl=True,
 ):
+    """Compute the full objective or component-wise ablations.
+
+    Disabled components contribute exactly zero while enabled components retain
+    the same coefficients as the full model. This makes the ablations explicit
+    and keeps the full configuration numerically identical to prior runs.
+    """
     zinb_loss = ZINBLoss(x_original, z_mean, z_dispersion, z_dropout)
     mse_loss = MSELoss()(x_recon, x_original)
     kl_loss = KLDLoss(mu_z, logvar_z)
-    reconstruction_loss = alpha * zinb_loss + (1 - alpha) * mse_loss
-    total_loss = reconstruction_loss + beta * kl_loss
+
+    total_loss = torch.zeros((), dtype=x_original.dtype, device=x_original.device)
+    if use_zinb:
+        total_loss = total_loss + alpha * zinb_loss
+    if use_mse:
+        total_loss = total_loss + (1 - alpha) * mse_loss
+    if use_kl:
+        total_loss = total_loss + beta * kl_loss
     return total_loss, zinb_loss, mse_loss, kl_loss
 
 
@@ -141,20 +150,18 @@ class VGAE(Module):
         super(VGAE, self).__init__()
         self.dropout1 = nn.Dropout(params["dropout1"])
         self.dropout2 = nn.Dropout(params["dropout2"])
+        self.sample_latent = params.get("sample_latent", True)
 
         input_dim = params["input_dim"]
         hidden1 = params["hidden1"]
         hidden2 = params["hidden2"]
         latent_dim = params.get("latent_dim", hidden1)
 
-        # All message passing stays in low-dimensional hidden/latent spaces.
         self.gcn1 = GCNConv(input_dim, hidden1)
         self.gn1 = GraphNorm(hidden1)
         self.gcn_mu = GCNConv(hidden1, latent_dim)
         self.gcn_logvar = GCNConv(hidden1, latent_dim)
 
-        # Project the latent representation to per-gene ZINB parameters only
-        # after graph propagation. This avoids materializing edge x gene tensors.
         self.zinb_mean = Linear(latent_dim, input_dim)
         self.zinb_dropout = Linear(latent_dim, input_dim)
         self.zinb_dispersion = Linear(latent_dim, input_dim)
@@ -174,7 +181,7 @@ class VGAE(Module):
         return mu_z, logvar_z
 
     def reparameterize(self, mu_z, logvar_z):
-        if self.training:
+        if self.training and self.sample_latent:
             std = torch.exp(0.5 * logvar_z)
             return mu_z + torch.randn_like(std) * std
         return mu_z
@@ -204,6 +211,15 @@ class VGAE(Module):
         return x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z
 
 
+ABLATION_CONFIGS = {
+    "full": {"use_zinb": True, "use_mse": True, "use_kl": True, "sample_latent": True},
+    "no_kl": {"use_zinb": True, "use_mse": True, "use_kl": False, "sample_latent": True},
+    "no_zinb": {"use_zinb": False, "use_mse": True, "use_kl": True, "sample_latent": True},
+    "no_recon": {"use_zinb": True, "use_mse": False, "use_kl": True, "sample_latent": True},
+    "deterministic": {"use_zinb": True, "use_mse": True, "use_kl": False, "sample_latent": False},
+}
+
+
 def run_model(
     input_data,
     verbose=False,
@@ -211,8 +227,15 @@ def run_model(
     graph_k=30,
     graph_pca_dim=50,
     latent_dim=128,
+    ablation="full",
 ):
-    """Run the variational scVGAE model."""
+    """Run scVGAE, optionally with one of the predefined ablations."""
+    if ablation not in ABLATION_CONFIGS:
+        raise ValueError(
+            f"Unknown ablation '{ablation}'. Choose from {sorted(ABLATION_CONFIGS)}"
+        )
+    ablation_config = ABLATION_CONFIGS[ablation]
+
     params = {
         "dropout1": 0.2,
         "dropout2": 0.4,
@@ -222,14 +245,13 @@ def run_model(
         "lr": 0.0001,
         "alpha": 0.05,
         "beta": 0.0001,
+        "sample_latent": ablation_config["sample_latent"],
     }
 
     if not device:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     x, adj = get_data(input_data, k=graph_k, pca_dim=graph_pca_dim)
-    # The transpose is needed only by the gene-wise BatchNorm residual term;
-    # no gene graph is constructed because it is not used by message passing.
     x_t = torch.tensor(input_data.T.values, dtype=torch.float)
 
     x, adj = x.to(device), adj.to(device)
@@ -256,6 +278,9 @@ def run_model(
             logvar_z,
             params["alpha"],
             params["beta"],
+            use_zinb=ablation_config["use_zinb"],
+            use_mse=ablation_config["use_mse"],
+            use_kl=ablation_config["use_kl"],
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
