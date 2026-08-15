@@ -68,9 +68,7 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
     )
 
     is_zero = (y_true < eps).float()
-    zero_terms = torch.log(
-        pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta) + eps
-    )
+    zero_terms = torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta) + eps)
 
     result = -torch.sum(zero_terms * is_zero + (1 - is_zero) * nb_terms)
     return torch.round(result, decimals=3)
