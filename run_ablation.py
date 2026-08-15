@@ -29,11 +29,7 @@ def save_results(records, output_dir, metadata):
 
     good = frame[frame.get("status", "") == "ok"].copy()
     if not good.empty:
-        summary = (
-            good.groupby("ablation")[["ARI", "AMI"]]
-            .mean()
-            .reindex(ABLATIONS)
-        )
+        summary = good.groupby("ablation")[["ARI", "AMI"]].mean().reindex(ABLATIONS)
         summary.to_csv(output_dir / "ablation_summary.csv")
 
 
@@ -60,9 +56,7 @@ def main():
     parser.add_argument("--graph-k", type=int, default=30)
     parser.add_argument("--graph-pca-dim", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--device", choices=["auto", "cpu", "cuda"], default="auto"
-    )
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--output-dir", default="ablation_results_vgae")
     parser.add_argument(
         "--no-resume",
@@ -113,7 +107,9 @@ def main():
     }
 
     for dataset_index, dataset in enumerate(args.datasets, start=1):
-        print(f"\n[{dataset_index}/{len(args.datasets)}] {dataset}: loading", flush=True)
+        print(
+            f"\n[{dataset_index}/{len(args.datasets)}] {dataset}: loading", flush=True
+        )
         try:
             raw, source = load_dataset(args.data_root, dataset)
             processed, labels = historical_preprocess(raw)

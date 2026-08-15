@@ -213,10 +213,30 @@ class VGAE(Module):
 
 ABLATION_CONFIGS = {
     "full": {"use_zinb": True, "use_mse": True, "use_kl": True, "sample_latent": True},
-    "no_kl": {"use_zinb": True, "use_mse": True, "use_kl": False, "sample_latent": True},
-    "no_zinb": {"use_zinb": False, "use_mse": True, "use_kl": True, "sample_latent": True},
-    "no_recon": {"use_zinb": True, "use_mse": False, "use_kl": True, "sample_latent": True},
-    "deterministic": {"use_zinb": True, "use_mse": True, "use_kl": False, "sample_latent": False},
+    "no_kl": {
+        "use_zinb": True,
+        "use_mse": True,
+        "use_kl": False,
+        "sample_latent": True,
+    },
+    "no_zinb": {
+        "use_zinb": False,
+        "use_mse": True,
+        "use_kl": True,
+        "sample_latent": True,
+    },
+    "no_recon": {
+        "use_zinb": True,
+        "use_mse": False,
+        "use_kl": True,
+        "sample_latent": True,
+    },
+    "deterministic": {
+        "use_zinb": True,
+        "use_mse": True,
+        "use_kl": False,
+        "sample_latent": False,
+    },
 }
 
 
