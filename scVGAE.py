@@ -18,10 +18,12 @@ from tqdm import tqdm
 
 
 def get_topX(X):
+    """Retain similarities above the 85th percentile."""
     return X * np.array(X > np.percentile(X, 85), dtype=int)
 
 
 def get_adj(x):
+    """Create a binary sparse adjacency matrix from non-zero similarities."""
     adj = SparseTensor(
         row=torch.tensor(np.array(x.nonzero()))[0],
         col=torch.tensor(np.array(x.nonzero()))[1],
@@ -31,23 +33,30 @@ def get_adj(x):
 
 
 def get_data(X, metric="linear"):
+    """Create the cell feature matrix and thresholded cell-cell graph."""
     dist = pairwise_kernels(X, metric=metric)
     dist_x = get_topX(dist)
     return torch.tensor(X.values, dtype=torch.float), get_adj(dist_x)
 
 
 def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
-    """
-    Compute the ZINB Loss.
+    """Compute the zero-inflated negative binomial loss.
 
-    y_true: Ground truth data.
-    y_pred: Predicted mean from the model.
-    theta: Dispersion parameter.
-    pi: Zero-inflation probability.
-    eps: Small constant to prevent log(0).
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Observed expression matrix.
+    y_pred : torch.Tensor
+        Predicted ZINB mean parameter (mu).
+    theta : torch.Tensor
+        Predicted dispersion parameter.
+    pi : torch.Tensor
+        Predicted zero-inflation probability.
+    eps : float
+        Small constant for numerical stability.
     """
 
-    # Negative Binomial Loss
+    # Negative-binomial negative log-likelihood for non-zero observations.
     nb_terms = (
         -torch.lgamma(y_true + theta)
         + torch.lgamma(y_true + 1)
@@ -58,60 +67,48 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         + y_true * torch.log(y_pred + eps)
     )
 
-    # Zero-Inflation
-    zero_inflated = torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta))
-
-    result = -torch.sum(
-        torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta))
-        * (y_true < eps).float()
-        + (1 - (y_true < eps).float()) * nb_terms
+    is_zero = (y_true < eps).float()
+    zero_terms = torch.log(
+        pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta) + eps
     )
 
+    result = -torch.sum(zero_terms * is_zero + (1 - is_zero) * nb_terms)
     return torch.round(result, decimals=3)
 
 
 def compute_loss(x_original, x_recon, z_mean, z_dropout, z_dispersion, alpha):
+    """Compute the historical scVGAE objective.
+
+    The experiments use:
+        alpha * ZINB loss + (1 - alpha) * reconstruction MSE.
     """
-    Compute the combined loss: ZINB Loss + MSE Loss.
-
-    Parameters:
-    - x_original: Original data matrix.
-    - x_recon: Reconstructed matrix from the model.
-    - z_mean, z_dropout, z_dispersion: Outputs from the model, used for ZINB Loss calculation.
-    - device: Device to which tensors should be moved before computation.
-    - lambda_1, lambda_2: Weights for ZINB Loss and MSE Loss respectively.
-
-    Returns:
-    - total_loss: Combined loss value.
-    """
-
-    # Compute ZINB Loss (assuming ZINBLoss is a properly defined function or class)
     zinb_loss = ZINBLoss(x_original, z_mean, z_dispersion, z_dropout)
-
-    # Compute MSE Loss
     mse_loss = MSELoss()(x_recon, x_original)
-
-    # Combine the losses
     total_loss = alpha * zinb_loss + (1 - alpha) * mse_loss
-
     return total_loss
 
 
 class VGAE(Module):
+    """ZINB-based graph autoencoder used by scVGAE.
+
+    Note: the historical class name is retained for backward compatibility.
+    The architecture does not perform variational latent sampling or use a KL term.
+    """
+
     def __init__(self, params):
         super(VGAE, self).__init__()
 
         self.dropout1 = nn.Dropout(params["dropout1"])
         self.dropout2 = nn.Dropout(params["dropout2"])
 
-        # Encoder with 2 gcn layers
+        # Graph encoder and ZINB parameter heads.
         self.gcn1 = GCNConv(params["input_dim"], params["hidden1"])
         self.gn1 = GraphNorm(params["hidden1"])
         self.gcn2_mean = GCNConv(params["hidden1"], params["input_dim"])
         self.gcn2_dropout = GCNConv(params["hidden1"], params["input_dim"])
         self.gcn2_dispersion = GCNConv(params["hidden1"], params["input_dim"])
 
-        # Decoder with 2 Linear layers
+        # Decoder with two linear layers.
         self.fc1 = Linear(params["input_dim"], params["hidden2"])
         self.bn2 = BatchNorm1d(params["hidden2"])
         self.fc2 = Linear(params["hidden2"], params["input_dim"])
@@ -133,25 +130,14 @@ class VGAE(Module):
         z = self.dropout2(z)
         return relu(self.fc2(z))
 
-    def forward(
-        self,
-        x,
-        adj,
-        x_t,
-        adj_t,
-    ):
+    def forward(self, x, adj, x_t):
         z_mean, z_dropout, z_dispersion = self.encode(x, adj.t())
         x_recon = self.decode(z_mean) + self.batch_norm1(x) + self.batch_norm2(x_t).T
         return x_recon, z_mean, z_dropout, z_dispersion
 
 
 def run_model(input_data, verbose=False, device=False):
-    """Run model
-
-    input_data: gene expression matrix
-    params: hyperparameters
-    clustering: whether to add batch normalized data
-    """
+    """Run scVGAE on a cell-by-gene expression matrix."""
 
     params = {
         "dropout1": 0.2,
@@ -167,25 +153,19 @@ def run_model(input_data, verbose=False, device=False):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     x, adj = get_data(input_data)
-    x_t, adj_t = get_data(input_data.T)
+    x_t = torch.tensor(input_data.T.values, dtype=torch.float)
 
     x = x.to(device)
     adj = adj.to(device)
     x_t = x_t.to(device)
-    adj_t = adj_t.to(device)
 
     params["input_dim"] = input_data.shape[1]
     params["hidden0"] = input_data.shape[0]
 
     model = VGAE(params).to(device)
-    optimizer_name = "Adam"
-    optimizer = getattr(torch.optim, optimizer_name)(
-        model.parameters(),
-        lr=params["lr"],
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"])
 
     losses = []
-    res = pd.DataFrame()
 
     if verbose:
         epochs = tqdm(range(params["epochs"]))
@@ -193,11 +173,17 @@ def run_model(input_data, verbose=False, device=False):
         epochs = range(params["epochs"])
 
     for epoch in epochs:
-        x_recon, z_mean, z_dropout, z_dispersion = model(x, adj, x_t, adj_t)
+        x_recon, z_mean, z_dropout, z_dispersion = model(x, adj, x_t)
 
-        # Compute the ZINB Loss using the outputs from the model
+        # Keep the historical loss weighting while passing ZINB parameters
+        # in their intended order: mean, dropout probability, dispersion.
         loss = compute_loss(
-            x, x_recon, z_mean, z_dispersion, z_dropout, params["alpha"]
+            x,
+            x_recon,
+            z_mean,
+            z_dropout,
+            z_dispersion,
+            params["alpha"],
         ).to(device)
         optimizer.zero_grad()
         loss.backward()
