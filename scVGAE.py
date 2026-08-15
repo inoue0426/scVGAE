@@ -1,38 +1,24 @@
-import os
-import random
-
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import torch_geometric
 from sklearn.metrics.pairwise import pairwise_kernels
-from torch.nn import BatchNorm1d, CrossEntropyLoss, Dropout, Linear, Module, MSELoss
-from torch.nn.functional import relu, softplus
-from torch_geometric.data import Data
-from torch_geometric.nn import GATConv, GCNConv, GraphNorm
+from torch.nn import BatchNorm1d, Linear, Module, MSELoss
+from torch.nn.functional import relu
+from torch_geometric.nn import GCNConv, GraphNorm
 from tqdm import tqdm
 
 
 def get_topX(X):
-    # Retain similarities above the 85th percentile.
     return X * np.array(X > np.percentile(X, 85), dtype=int)
 
 
 def get_adj(x):
-    """Return graph connectivity as a PyG edge_index tensor.
-
-    Using a plain torch.LongTensor avoids a hard dependency on
-    torch_sparse.SparseTensor while remaining compatible with GCNConv.
-    """
     row, col = x.nonzero()
     return torch.tensor(np.vstack((row, col)), dtype=torch.long)
 
 
 def transpose_adj(edge_index):
-    """Reverse source and target rows of a PyG edge_index tensor."""
     return edge_index.flip(0)
 
 
@@ -43,22 +29,12 @@ def get_data(X, metric="linear"):
 
 
 def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
-    """Compute the standard zero-inflated negative binomial NLL.
-
-    y_true: Observed values.
-    y_pred: Predicted ZINB mean parameter (mu).
-    theta: Predicted dispersion parameter.
-    pi: Predicted zero-inflation probability.
-    eps: Small constant for numerical stability.
-    """
-
+    """Standard zero-inflated negative-binomial negative log-likelihood."""
     y_pred = torch.clamp(y_pred, min=eps)
     theta = torch.clamp(theta, min=eps)
     pi = torch.clamp(pi, min=eps, max=1 - eps)
 
     log_theta_mu = torch.log(theta + y_pred + eps)
-
-    # log P_NB(x | mu, theta)
     nb_log_prob = (
         torch.lgamma(y_true + theta)
         - torch.lgamma(theta)
@@ -66,28 +42,17 @@ def ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         + theta * (torch.log(theta + eps) - log_theta_mu)
         + y_true * (torch.log(y_pred + eps) - log_theta_mu)
     )
-
-    # For x = 0, P_NB(0 | mu, theta) = (theta / (theta + mu)) ** theta.
     nb_zero_log_prob = theta * (torch.log(theta + eps) - log_theta_mu)
     zero_log_prob = torch.logaddexp(
-        torch.log(pi),
-        torch.log1p(-pi) + nb_zero_log_prob,
+        torch.log(pi), torch.log1p(-pi) + nb_zero_log_prob
     )
-
-    # For x > 0, ZINB probability is (1 - pi) * P_NB(x | mu, theta).
     nonzero_log_prob = torch.log1p(-pi) + nb_log_prob
-
     log_prob = torch.where(y_true < eps, zero_log_prob, nonzero_log_prob)
     return -torch.sum(log_prob)
 
 
 def legacy_ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
-    """Historical scVGAE loss expression retained for reference only.
-
-    This preserves the original non-zero branch and three-decimal rounding.
-    It is not used by the default training path.
-    """
-
+    """Historical scVGAE ZINB expression retained only for comparison."""
     nb_terms = (
         -torch.lgamma(y_true + theta)
         + torch.lgamma(y_true + 1)
@@ -97,99 +62,111 @@ def legacy_ZINBLoss(y_true, y_pred, theta, pi, eps=1e-10):
         - y_true * torch.log(y_pred + theta + eps)
         + y_true * torch.log(y_pred + eps)
     )
-
     result = -torch.sum(
         torch.log(pi + (1 - pi) * torch.pow(1 + y_pred / theta, -theta))
         * (y_true < eps).float()
         + (1 - (y_true < eps).float()) * nb_terms
     )
-
     return torch.round(result, decimals=3)
 
 
-def compute_loss(x_original, x_recon, z_mean, z_dropout, z_dispersion, alpha):
-    """
-    Compute the corrected scVGAE objective:
-    alpha * ZINB NLL + (1 - alpha) * MSE Loss.
+def KLDLoss(mu_z, logvar_z):
+    """KL[q(z|X,A) || N(0,I)], averaged across cells."""
+    kl = -0.5 * torch.sum(
+        1 + logvar_z - mu_z.pow(2) - logvar_z.exp(), dim=1
+    )
+    return torch.mean(kl)
 
-    Parameters:
-    - x_original: Original data matrix.
-    - x_recon: Reconstructed matrix from the model.
-    - z_mean: ZINB mean parameter.
-    - z_dropout: ZINB zero-inflation probability.
-    - z_dispersion: ZINB dispersion parameter.
-    - alpha: Weight for ZINB loss; (1-alpha) weights MSE loss.
 
-    Returns:
-    - total_loss: Combined loss value.
-    """
-
+def compute_loss(
+    x_original,
+    x_recon,
+    z_mean,
+    z_dropout,
+    z_dispersion,
+    mu_z,
+    logvar_z,
+    alpha,
+    beta,
+):
     zinb_loss = ZINBLoss(x_original, z_mean, z_dispersion, z_dropout)
     mse_loss = MSELoss()(x_recon, x_original)
-    total_loss = alpha * zinb_loss + (1 - alpha) * mse_loss
-
-    return total_loss
+    kl_loss = KLDLoss(mu_z, logvar_z)
+    reconstruction_loss = alpha * zinb_loss + (1 - alpha) * mse_loss
+    total_loss = reconstruction_loss + beta * kl_loss
+    return total_loss, zinb_loss, mse_loss, kl_loss
 
 
 class VGAE(Module):
+    """Variational graph autoencoder with ZINB observation heads."""
+
     def __init__(self, params):
         super(VGAE, self).__init__()
-
         self.dropout1 = nn.Dropout(params["dropout1"])
         self.dropout2 = nn.Dropout(params["dropout2"])
 
-        # Graph encoder with ZINB parameter heads.
-        # The historical class name VGAE is retained for compatibility;
-        # this implementation does not perform variational latent sampling.
-        self.gcn1 = GCNConv(params["input_dim"], params["hidden1"])
-        self.gn1 = GraphNorm(params["hidden1"])
-        self.gcn2_mean = GCNConv(params["hidden1"], params["input_dim"])
-        self.gcn2_dropout = GCNConv(params["hidden1"], params["input_dim"])
-        self.gcn2_dispersion = GCNConv(params["hidden1"], params["input_dim"])
+        input_dim = params["input_dim"]
+        hidden1 = params["hidden1"]
+        hidden2 = params["hidden2"]
+        latent_dim = params.get("latent_dim", input_dim)
 
-        # Decoder with 2 Linear layers
-        self.fc1 = Linear(params["input_dim"], params["hidden2"])
-        self.bn2 = BatchNorm1d(params["hidden2"])
-        self.fc2 = Linear(params["hidden2"], params["input_dim"])
+        self.gcn1 = GCNConv(input_dim, hidden1)
+        self.gn1 = GraphNorm(hidden1)
+        self.gcn_mu = GCNConv(hidden1, latent_dim)
+        self.gcn_logvar = GCNConv(hidden1, latent_dim)
 
-        self.batch_norm1 = BatchNorm1d(params["input_dim"])
+        self.gcn_zinb_mean = GCNConv(latent_dim, input_dim)
+        self.gcn_zinb_dropout = GCNConv(latent_dim, input_dim)
+        self.gcn_zinb_dispersion = GCNConv(latent_dim, input_dim)
+
+        self.fc1 = Linear(latent_dim, hidden2)
+        self.bn2 = BatchNorm1d(hidden2)
+        self.fc2 = Linear(hidden2, input_dim)
+
+        self.batch_norm1 = BatchNorm1d(input_dim)
         self.batch_norm2 = BatchNorm1d(params["hidden0"])
 
-    def encode(self, x, adj):
-        x = relu(self.gn1(self.gcn1(x, adj)))
-        x = self.dropout1(x)
+    def encode(self, x, edge_index):
+        h = relu(self.gn1(self.gcn1(x, edge_index)))
+        h = self.dropout1(h)
+        mu_z = self.gcn_mu(h, edge_index)
+        logvar_z = torch.clamp(self.gcn_logvar(h, edge_index), min=-10.0, max=10.0)
+        return mu_z, logvar_z
 
-        adj_t = transpose_adj(adj)
-        z_mean = torch.exp(self.gcn2_mean(x, adj_t))
-        z_dropout = torch.sigmoid(self.gcn2_dropout(x, adj_t))
-        z_dispersion = torch.exp(self.gcn2_dispersion(x, adj_t))
+    def reparameterize(self, mu_z, logvar_z):
+        if self.training:
+            std = torch.exp(0.5 * logvar_z)
+            return mu_z + torch.randn_like(std) * std
+        return mu_z
+
+    def decode_zinb(self, z, edge_index):
+        z_mean = torch.exp(torch.clamp(self.gcn_zinb_mean(z, edge_index), max=15.0))
+        z_dropout = torch.sigmoid(self.gcn_zinb_dropout(z, edge_index))
+        z_dispersion = torch.exp(
+            torch.clamp(self.gcn_zinb_dispersion(z, edge_index), max=15.0)
+        )
         return z_mean, z_dropout, z_dispersion
 
-    def decode(self, z):
-        z = relu(self.bn2(self.fc1(z)))
-        z = self.dropout2(z)
-        return relu(self.fc2(z))
+    def decode_expression(self, z):
+        h = relu(self.bn2(self.fc1(z)))
+        h = self.dropout2(h)
+        return relu(self.fc2(h))
 
-    def forward(
-        self,
-        x,
-        adj,
-        x_t,
-        adj_t,
-    ):
-        z_mean, z_dropout, z_dispersion = self.encode(x, transpose_adj(adj))
-        x_recon = self.decode(z_mean) + self.batch_norm1(x) + self.batch_norm2(x_t).T
-        return x_recon, z_mean, z_dropout, z_dispersion
+    def forward(self, x, adj, x_t, adj_t):
+        edge_index = transpose_adj(adj)
+        mu_z, logvar_z = self.encode(x, edge_index)
+        z = self.reparameterize(mu_z, logvar_z)
+        z_mean, z_dropout, z_dispersion = self.decode_zinb(z, edge_index)
+        x_recon = (
+            self.decode_expression(z)
+            + self.batch_norm1(x)
+            + self.batch_norm2(x_t).T
+        )
+        return x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z
 
 
 def run_model(input_data, verbose=False, device=False):
-    """Run model
-
-    input_data: gene expression matrix
-    params: hyperparameters
-    clustering: whether to add batch normalized data
-    """
-
+    """Run scVGAE using the variational graph autoencoder objective."""
     params = {
         "dropout1": 0.2,
         "dropout2": 0.4,
@@ -198,6 +175,7 @@ def run_model(input_data, verbose=False, device=False):
         "hidden2": 1024,
         "lr": 0.0001,
         "alpha": 0.05,
+        "beta": 0.0001,
     }
 
     if not device:
@@ -205,43 +183,36 @@ def run_model(input_data, verbose=False, device=False):
 
     x, adj = get_data(input_data)
     x_t, adj_t = get_data(input_data.T)
-
-    x = x.to(device)
-    adj = adj.to(device)
-    x_t = x_t.to(device)
-    adj_t = adj_t.to(device)
+    x, adj = x.to(device), adj.to(device)
+    x_t, adj_t = x_t.to(device), adj_t.to(device)
 
     params["input_dim"] = input_data.shape[1]
     params["hidden0"] = input_data.shape[0]
+    params["latent_dim"] = input_data.shape[1]
 
     model = VGAE(params).to(device)
-    optimizer_name = "Adam"
-    optimizer = getattr(torch.optim, optimizer_name)(
-        model.parameters(),
-        lr=params["lr"],
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"])
+    epochs = tqdm(range(params["epochs"])) if verbose else range(params["epochs"])
 
-    losses = []
-    res = pd.DataFrame()
-
-    if verbose:
-        epochs = tqdm(range(params["epochs"]))
-    else:
-        epochs = range(params["epochs"])
-
-    for epoch in epochs:
-        x_recon, z_mean, z_dropout, z_dispersion = model(x, adj, x_t, adj_t)
-
-        # Pass the ZINB outputs in their intended order:
-        # mean, zero-inflation probability, dispersion.
-        loss = compute_loss(
-            x, x_recon, z_mean, z_dropout, z_dispersion, params["alpha"]
-        ).to(device)
+    for _ in epochs:
+        outputs = model(x, adj, x_t, adj_t)
+        x_recon, z_mean, z_dropout, z_dispersion, mu_z, logvar_z = outputs
+        loss, _, _, _ = compute_loss(
+            x,
+            x_recon,
+            z_mean,
+            z_dropout,
+            z_dispersion,
+            mu_z,
+            logvar_z,
+            params["alpha"],
+            params["beta"],
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        losses.append(loss.item())
-
-    pred = x_recon.cpu().detach().numpy()
-    return pred
+    model.eval()
+    with torch.no_grad():
+        x_recon, *_ = model(x, adj, x_t, adj_t)
+    return x_recon.cpu().numpy()
